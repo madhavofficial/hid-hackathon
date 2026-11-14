@@ -47,6 +47,42 @@ def ensure_otp_table(table_name: str = OTP_TABLE) -> str:
     return table_name
 
 
+def _sms_sandbox_block_reason(sns, phone_number: str) -> str | None:
+    """Return an error string when the sandbox will reject this number.
+
+    Returns None when the account is not in the sandbox, the number is verified,
+    or this role cannot read sandbox status. The caller then uses sns.publish.
+    """
+    try:
+        status = sns.get_sms_sandbox_account_status()
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "AccessDeniedException":
+            return None
+        raise
+    if not status.get("IsInSandbox"):
+        return None
+
+    token = None
+    while True:
+        kwargs = {"NextToken": token} if token else {}
+        try:
+            page = sns.list_sms_sandbox_phone_numbers(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "AccessDeniedException":
+                return None
+            raise
+        for number in page.get("PhoneNumbers", []):
+            if number.get("PhoneNumber") == phone_number and number.get("Status") == "Verified":
+                return None
+        token = page.get("NextToken")
+        if not token:
+            break
+    return (
+        f"{phone_number} is not a verified SNS SMS sandbox number. "
+        "Verify it in the SNS console before sending."
+    )
+
+
 def send_otp(
     person_id: str,
     phone_number: str | None = None,
@@ -71,6 +107,9 @@ def send_otp(
         )
 
     ddb, sns = _clients()
+    sandbox_reason = _sms_sandbox_block_reason(sns, phone_number)
+    if sandbox_reason:
+        raise ValueError(sandbox_reason)
     ensure_otp_table(table_name)
 
     code = f"{secrets.randbelow(1_000_000):06d}"
@@ -119,11 +158,20 @@ def verify_otp(
     Raises ValueError when otp or person_id is missing. Raises ClientError
     when DynamoDB cannot be read, so a broken table is not treated as a wrong code.
     """
-    from .enroll import require_person_id
+    from .config import COLLECTION_ID
+    from .enroll import list_enrolled, require_person_id
 
     person_id = require_person_id(person_id)
     if otp is None or str(otp).strip() == "":
         raise ValueError("otp is required. Do not call verify_otp on the first visit.")
+
+    enrolled_ids = {
+        face["person_id"]
+        for face in list_enrolled(COLLECTION_ID)
+        if face.get("person_id")
+    }
+    if person_id not in enrolled_ids:
+        raise ValueError(f"{person_id} is not enrolled in collection {COLLECTION_ID}.")
 
     ddb, _ = _clients()
     table = ddb.Table(table_name)
