@@ -21,7 +21,7 @@ class Settings:
     face_width_min: float = 0.12
     pose_angle_max: float = 25.0
     motion_threshold: float = 0.005
-    live_output_index: int = 0
+    live_output_index: int = 2
     model_input_width: int = 80
     model_input_height: int = 80
     max_image_bytes: int = 5 * 1024 * 1024

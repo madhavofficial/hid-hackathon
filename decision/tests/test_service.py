@@ -177,6 +177,16 @@ def test_allow_and_single_rekognition_calls():
         harness.close()
 
 
+def test_unenrolled_low_live_score_is_not_spoof():
+    harness = Harness(spoof=0.0004, person_id=None, similarity=0.0)
+    try:
+        response = send(harness)
+        assert response.json()["decision"] == "deny"
+        assert response.json()["reason"] == "identity_mismatch"
+    finally:
+        harness.close()
+
+
 def test_identity_mismatch():
     harness = Harness(person_id=None)
     try:
@@ -297,15 +307,21 @@ def test_invalid_otp_is_denied_and_valid_otp_is_consumed():
 
 
 def test_one_frame_requires_a_code():
-    harness = Harness()
+    rejected_harness = Harness()
+    accepted_harness = Harness()
     try:
-        rejected = send(harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": None})
+        rejected = send(
+            rejected_harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": None}
+        )
         assert rejected.status_code == 422
-        accepted = send(harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": "482901"})
+        accepted = send(
+            accepted_harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": "482901"}
+        )
         assert accepted.status_code == 200
         assert accepted.json()["decision"] == "allow"
     finally:
-        harness.close()
+        rejected_harness.close()
+        accepted_harness.close()
 
 
 def test_invalid_input_is_rejected_and_logged():

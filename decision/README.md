@@ -26,7 +26,7 @@ locally; image data and OTPs are not logged. The default visit table is
 | `OTP_DYNAMODB_TABLE` | `hid_otp_codes` | Person 3's OTP table |
 | `OTP_MAX_ATTEMPTS` | `5` | Failed OTP attempts before the code is removed |
 | `ANTISPOOF_MODEL_PATH` | `decision/models/antispoof.onnx` | CPU ONNX model |
-| `ANTISPOOF_LIVE_OUTPUT_INDEX` | `1` | Index of the live class in model logits |
+| `ANTISPOOF_LIVE_OUTPUT_INDEX` | `2` | Index of the live class in model logits |
 | `ANTISPOOF_INPUT_WIDTH` / `ANTISPOOF_INPUT_HEIGHT` | `80` / `80` | Dimensions for dynamic model inputs |
 | `SPOOF_THRESHOLD` | `0.8` | Minimum live-class probability |
 | `SIMILARITY_THRESHOLD` | `90` | Minimum Rekognition similarity (0–100) |
@@ -38,8 +38,10 @@ locally; image data and OTPs are not logged. The default visit table is
 | `MAX_IMAGE_BYTES` | `5242880` | Maximum decoded size per JPEG |
 
 The included model is MiniFASNet-V2 (`decision/models/antispoof.onnx`),
-80×80 BGR, pixels divided by 255. Classes are live, print, replay. The live
-class is output index 0. The service crops a 2.7× square around the face
+80×80 BGR, pixels divided by 255. Classes are live, print, replay in the model card, but this ONNX file
+puts the live mass on output index 2. The service uses index 2 as the live
+score. A face that does not match `hid-faces` is `identity_mismatch`, never
+`spoof`. The service crops a 2.7× square around the face
 before inference. A valid OTP is kept when the decision is `ask_again`, and
 deleted only after Allow or Deny. Closed eyes are `ask_again` unless the
 frames are a blink, closed then open.

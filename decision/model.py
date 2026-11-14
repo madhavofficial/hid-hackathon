@@ -14,7 +14,7 @@ class OnnxAntiSpoofModel:
     def __init__(
         self,
         model_path: Path,
-        live_output_index: int = 1,
+        live_output_index: int = 2,
         input_width: int = 80,
         input_height: int = 80,
     ) -> None:

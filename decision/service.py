@@ -274,23 +274,19 @@ def _analyze_request(
     if quality_reason == "eyes_closed" and frame_analysis.blink_sequence:
         quality_reason = None
 
+    matching = bool(person_id and similarity >= settings.similarity_threshold)
     if quality_reason:
         decision, reason = "ask_again", "low_quality"
-    elif spoof_score < settings.spoof_threshold:
-        decision, reason = "deny", "spoof"
-    else:
-        matching = bool(person_id and similarity >= settings.similarity_threshold)
-        if (
-        matching
-        and len(decoded) >= 2
+    elif not matching:
+        decision, reason = "deny", "identity_mismatch"
+    elif spoof_score < settings.spoof_threshold or (
+        len(decoded) >= 2
         and frame_analysis.motion < settings.motion_threshold
         and not frame_analysis.blink_sequence
-        ):
-            decision, reason = "deny", "spoof"
-        elif matching:
-            decision, reason = "allow", "live_and_match"
-        else:
-            decision, reason = "deny", "identity_mismatch"
+    ):
+        decision, reason = "deny", "spoof"
+    else:
+        decision, reason = "allow", "live_and_match"
 
     if otp_accepted and person_id and decision != "ask_again":
         _consume_otp(runtime, person_id)
