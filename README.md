@@ -164,6 +164,44 @@ A blink retry is the same call with two frames, eyes closed then eyes open. A co
 
 Done when a real payload returns in under 2 seconds with scores and `elapsed_ms`.
 
+The service implementation lives in `decision/` on the `decision` branch. It uses
+the `visits` DynamoDB table by default, configurable with `VISITS_TABLE`.
+
+Install its dependencies and run locally from the repository root:
+
+```bash
+python -m pip install -r decision/requirements.txt
+python -m uvicorn decision.app:app --host 127.0.0.1 --port 8000
+python -m pytest decision/tests
+```
+
+Configure the service with environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AWS_REGION` | `us-east-1` | AWS service region |
+| `REKOGNITION_COLLECTION_ID` | `hid-faces` | Person 3's enrolled-face collection |
+| `VISITS_TABLE` | `visits` | DynamoDB visit log table |
+| `OTP_DYNAMODB_TABLE` | `hid_otp_codes` | Person 3's OTP table |
+| `OTP_MAX_ATTEMPTS` | `5` | Failed OTP attempts before the code is removed |
+| `ANTISPOOF_MODEL_PATH` | `decision/models/antispoof.onnx` | Local ONNX model file |
+| `ANTISPOOF_LIVE_OUTPUT_INDEX` | `1` | Index of the live class in ONNX output logits |
+| `ANTISPOOF_INPUT_WIDTH` / `ANTISPOOF_INPUT_HEIGHT` | `80` / `80` | Dimensions for dynamic ONNX inputs |
+| `SPOOF_THRESHOLD` | `0.8` | Minimum live probability |
+| `SIMILARITY_THRESHOLD` | `90` | Minimum Rekognition similarity (0–100) |
+| `SHARPNESS_THRESHOLD` | `20` | Minimum DetectFaces sharpness |
+| `BRIGHTNESS_MIN` / `BRIGHTNESS_MAX` | `25` / `85` | Acceptable DetectFaces brightness |
+| `FACE_WIDTH_MIN` | `0.12` | Minimum relative face width |
+| `POSE_ANGLE_MAX` | `25` | Maximum absolute yaw, pitch, and roll |
+| `MOTION_THRESHOLD` | `0.005` | Minimum normalized adjacent-frame motion |
+| `MAX_IMAGE_BYTES` | `5242880` | Maximum decoded size per JPEG |
+
+These are starting values, not calibrated thresholds; they do not guarantee
+accuracy, false-accept, or false-reject targets. Authenticate through the AWS
+SDK credential chain, preferably an IAM role on the runtime. Never put AWS
+credentials in source control. The runtime fails closed and records an error
+when the model file is missing; do not substitute a placeholder liveness score.
+
 Build one warm CPU process. A container Lambda is fine only if it stays warm. A cold start can spend the whole 2 seconds before the model runs. A small EC2 instance or App Runner in `us-east-1` is the safer demo host. Standard EC2 quota is 256 vCPUs.
 
 On each request:

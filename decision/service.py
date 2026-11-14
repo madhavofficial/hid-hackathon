@@ -1,0 +1,376 @@
+import hmac
+import math
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+
+import boto3
+from botocore.config import Config as BotoConfig
+
+from .config import Settings
+from .model import OnnxAntiSpoofModel
+from .vision import (
+    DecodedFrame,
+    FrameAnalysis,
+    InvalidFrameError,
+    analyze_frames,
+    decode_frame,
+)
+
+
+class AnalysisError(RuntimeError):
+    pass
+
+
+def _worker_ready() -> None:
+    return None
+
+
+@dataclass
+class Runtime:
+    settings: Settings
+    model: OnnxAntiSpoofModel
+    rekognition: Any
+    visits_table: Any
+    otp_table: Any
+    executor: ThreadPoolExecutor
+
+    def close(self) -> None:
+        self.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def create_runtime(settings: Settings) -> Runtime:
+    aws_config = BotoConfig(
+        connect_timeout=1.0,
+        read_timeout=1.5,
+        retries={"total_max_attempts": 1},
+    )
+    rekognition = boto3.client(
+        "rekognition", region_name=settings.aws_region, config=aws_config
+    )
+    dynamodb = boto3.resource(
+        "dynamodb", region_name=settings.aws_region, config=aws_config
+    )
+    model = OnnxAntiSpoofModel(
+        settings.model_path,
+        live_output_index=settings.live_output_index,
+        input_width=settings.model_input_width,
+        input_height=settings.model_input_height,
+    )
+    executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="decision")
+    for future in [executor.submit(_worker_ready) for _ in range(3)]:
+        future.result()
+    return Runtime(
+        settings=settings,
+        model=model,
+        rekognition=rekognition,
+        visits_table=dynamodb.Table(settings.visits_table),
+        otp_table=dynamodb.Table(settings.otp_table),
+        executor=executor,
+    )
+
+
+def _visit_item(
+    visit_id: str,
+    started_at: float,
+    decision: str,
+    reason: str,
+    scores: dict[str, float | None],
+    label: str | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    def ddb_number(value: float | None) -> Decimal | None:
+        return Decimal(str(value)) if value is not None else None
+
+    item: dict[str, Any] = {
+        "visit_id": visit_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "decision": decision,
+        "reason": reason,
+        "spoof": ddb_number(scores["spoof"]),
+        "similarity": ddb_number(scores["similarity"]),
+        "sharpness": ddb_number(scores["sharpness"]),
+        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+        "label": label,
+    }
+    if error:
+        item["error"] = error
+    return item
+
+
+def _persist(
+    runtime: Runtime,
+    visit_id: str,
+    started_at: float,
+    decision: str,
+    reason: str,
+    scores: dict[str, float | None],
+    label: str | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    item = _visit_item(visit_id, started_at, decision, reason, scores, label, error)
+    runtime.visits_table.put_item(Item=item)
+    return item
+
+
+def _verify_otp(runtime: Runtime, otp: str, person_id: str) -> bool:
+    response = runtime.otp_table.get_item(Key={"person_id": person_id})
+    item = response.get("Item")
+    if not item:
+        return False
+
+    now = int(time.time())
+    if int(item.get("expires_at", 0)) < now:
+        runtime.otp_table.delete_item(Key={"person_id": person_id})
+        return False
+
+    if not hmac.compare_digest(str(item.get("code", "")).strip(), otp.strip()):
+        attempts = int(item.get("attempts", 0)) + 1
+        max_attempts = runtime.settings.otp_max_attempts
+        if attempts >= max_attempts:
+            runtime.otp_table.delete_item(Key={"person_id": person_id})
+        else:
+            runtime.otp_table.update_item(
+                Key={"person_id": person_id},
+                UpdateExpression="SET attempts = :attempts",
+                ExpressionAttributeValues={":attempts": attempts},
+            )
+        return False
+
+    runtime.otp_table.delete_item(Key={"person_id": person_id})
+    return True
+
+
+def _face_quality(
+    response: dict[str, Any],
+    settings: Settings,
+) -> tuple[dict[str, Any] | None, str | None]:
+    faces = response.get("FaceDetails") or []
+    if not faces:
+        return None, "no_face"
+
+    face = max(
+        faces,
+        key=lambda detail: (
+            detail.get("BoundingBox", {}).get("Width", 0)
+            * detail.get("BoundingBox", {}).get("Height", 0)
+        ),
+    )
+    quality = face.get("Quality") or {}
+    pose = face.get("Pose") or {}
+    box = face.get("BoundingBox") or {}
+    if float(box.get("Width", 0)) < settings.face_width_min:
+        return face, "tiny_face"
+    if float(quality.get("Sharpness", 0)) < settings.sharpness_threshold:
+        return face, "sharpness"
+    brightness = float(quality.get("Brightness", 0))
+    sharpness = float(quality.get("Sharpness", 0))
+    if not math.isfinite(brightness) or not math.isfinite(sharpness):
+        return face, "image_quality"
+    if not settings.brightness_min <= brightness <= settings.brightness_max:
+        return face, "brightness"
+    if any(
+        not math.isfinite(float(pose.get(axis, 1000)))
+        or abs(float(pose.get(axis, 1000))) > settings.pose_angle_max
+        for axis in ("Yaw", "Pitch", "Roll")
+    ):
+        return face, "pose"
+
+    eye_state = face.get("EyesOpen") or {}
+    if eye_state.get("Value") is not True:
+        return face, "eyes_closed"
+    return face, None
+
+
+def _safe_quality_scores(face: dict[str, Any] | None) -> float | None:
+    if not face:
+        return None
+    sharpness = (face.get("Quality") or {}).get("Sharpness")
+    return float(sharpness) if sharpness is not None else None
+
+
+def _analyze_request(
+    runtime: Runtime,
+    decoded: list[DecodedFrame],
+    otp: str | None,
+    visit_id: str,
+    started_at: float,
+    label: str | None,
+) -> dict[str, Any]:
+    settings = runtime.settings
+    frame_analysis: FrameAnalysis = analyze_frames(decoded)
+    selected = decoded[frame_analysis.selected_index]
+    score_values: dict[str, float | None] = {
+        "spoof": None,
+        "similarity": 0.0,
+        "sharpness": None,
+    }
+
+    model_future = runtime.executor.submit(runtime.model.infer, selected.image)
+    detect_future = runtime.executor.submit(
+        runtime.rekognition.detect_faces,
+        Image={"Bytes": selected.jpeg_bytes},
+        Attributes=["ALL"],
+    )
+    search_future = runtime.executor.submit(
+        runtime.rekognition.search_faces_by_image,
+        CollectionId=settings.collection_id,
+        Image={"Bytes": selected.jpeg_bytes},
+        FaceMatchThreshold=settings.similarity_threshold,
+        MaxFaces=1,
+    )
+
+    results = []
+    errors = []
+    for future in (model_future, detect_future, search_future):
+        error = future.exception()
+        if error is not None:
+            errors.append(error)
+        else:
+            results.append(future.result())
+    if errors:
+        raise errors[0]
+
+    model_result, detect_response, search_response = results
+    spoof_score = float(model_result)
+    if not math.isfinite(spoof_score) or not 0 <= spoof_score <= 1:
+        raise ValueError("Anti-spoof model returned an invalid probability")
+    matches = search_response.get("FaceMatches") or []
+    similarity = float(matches[0].get("Similarity", 0.0)) if matches else 0.0
+    if not math.isfinite(similarity) or not 0 <= similarity <= 100:
+        raise ValueError("Rekognition returned an invalid similarity score")
+    person_id = (
+        (matches[0].get("Face") or {}).get("ExternalImageId") if matches else None
+    )
+    score_values.update(spoof=spoof_score, similarity=similarity)
+
+    face, quality_reason = _face_quality(detect_response, settings)
+    sharpness = _safe_quality_scores(face)
+    score_values["sharpness"] = sharpness
+    if otp is not None:
+        otp_valid = bool(person_id and _verify_otp(runtime, otp, person_id))
+        if not otp_valid:
+            return _persist(
+                runtime,
+                visit_id,
+                started_at,
+                "deny",
+                "otp_failed",
+                score_values,
+                label,
+            )
+
+    if quality_reason:
+        return _persist(
+            runtime,
+            visit_id,
+            started_at,
+            "ask_again",
+            "low_quality",
+            score_values,
+            label,
+        )
+
+    if spoof_score < settings.spoof_threshold:
+        return _persist(
+            runtime, visit_id, started_at, "deny", "spoof", score_values, label
+        )
+
+    matching = bool(person_id and similarity >= settings.similarity_threshold)
+    if (
+        matching
+        and frame_analysis.motion < settings.motion_threshold
+        and not frame_analysis.blink_sequence
+    ):
+        return _persist(
+            runtime, visit_id, started_at, "deny", "spoof", score_values, label
+        )
+    if matching:
+        return _persist(
+            runtime,
+            visit_id,
+            started_at,
+            "allow",
+            "live_and_match",
+            score_values,
+            label,
+        )
+    return _persist(
+        runtime,
+        visit_id,
+        started_at,
+        "deny",
+        "identity_mismatch",
+        score_values,
+        label,
+    )
+
+
+def process_check(
+    runtime: Runtime,
+    payload: Any,
+    visit_id: str | None = None,
+    started_at: float | None = None,
+) -> dict[str, Any]:
+    visit_id = visit_id or str(uuid.uuid4())
+    started_at = started_at if started_at is not None else time.perf_counter()
+    scores: dict[str, float | None] = {
+        "spoof": None,
+        "similarity": None,
+        "sharpness": None,
+    }
+
+    try:
+        if not isinstance(payload, dict):
+            raise InvalidFrameError("Request body must be a JSON object")
+        encoded_frames = payload.get("frames")
+        if not isinstance(encoded_frames, list) or len(encoded_frames) not in (2, 3):
+            raise InvalidFrameError("frames must contain two or three JPEG images")
+        otp = payload.get("otp")
+        if otp is not None and not isinstance(otp, str):
+            raise InvalidFrameError("otp must be a string or null")
+        label = payload.get("label")
+        if label is not None and not isinstance(label, str):
+            raise InvalidFrameError("label must be a string or null")
+
+        decoded = [
+            decode_frame(frame, runtime.settings.max_image_bytes)
+            for frame in encoded_frames
+        ]
+        return _analyze_request(runtime, decoded, otp, visit_id, started_at, label)
+    except InvalidFrameError:
+        label = payload.get("label") if isinstance(payload, dict) else None
+        _persist(
+            runtime,
+            visit_id,
+            started_at,
+            "deny",
+            "invalid_input",
+            scores,
+            label if isinstance(label, str) else None,
+            error="InvalidFrameError",
+        )
+        raise
+    except Exception as exc:
+        error_name = type(exc).__name__
+        try:
+            label = payload.get("label") if isinstance(payload, dict) else None
+            _persist(
+                runtime,
+                visit_id,
+                started_at,
+                "deny",
+                "analysis_error",
+                scores,
+                label if isinstance(label, str) else None,
+                error=error_name,
+            )
+        except Exception as persist_exc:
+            raise AnalysisError(
+                "Analysis and failure-row persistence both failed"
+            ) from persist_exc
+        raise AnalysisError("Decision analysis failed") from exc
