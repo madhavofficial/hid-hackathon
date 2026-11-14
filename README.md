@@ -2,7 +2,7 @@
 
 Build a laptop kiosk that decides, in under 2 seconds, whether the person at the camera is really here and is someone who is allowed in.
 
-This file is the brief. The four of us do not share a chat. Read your section, then stay inside your folder.
+
 
 ## What the judges want
 
