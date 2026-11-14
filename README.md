@@ -35,6 +35,17 @@ Person
 
 Alice in normal light is Allow. A phone playing a video of Alice can still match her face, and must be Deny. Live Bob is Deny because he is not enrolled. A dark or blurry Alice is Ask again, then a blink or a code. Do not guess on a bad frame.
 
+Handover, in the order that unblocks the demo:
+
+| From | To | What changes hands |
+|---|---|---|
+| Person 3 | Person 2 | Collection id, S3 bucket, and one enrolled person id |
+| Person 1 | Person 2 | `POST /check` body: `frames`, and later `otp` |
+| Person 2 | Person 1 | JSON: `decision`, `reason`, `scores`, `elapsed_ms` |
+| Person 3 | Person 2 | OTP pass or fail on a retry |
+| Person 2 | Person 4 | One DynamoDB item per visit |
+| Person 4 | Person 2 | A note only if a mask or a video got `allow` |
+
 The colored-light Face Liveness check and a SageMaker GPU endpoint are not on this path. Use them only if a mask or a hard video gets through the CPU checks during testing.
 
 ## Shared contract
@@ -135,6 +146,20 @@ Build a page that uses the laptop camera.
 
 You can point at a mock that returns `ask_again` until Person 2's service is up. Stay in `kiosk/`.
 
+**You receive**
+
+- The laptop camera.
+- Person 2's base URL for `POST /check`.
+- The JSON response: `decision`, `reason`, `scores`, `elapsed_ms`.
+
+**You hand to Person 2**
+
+```json
+{ "frames": ["<jpeg base64>", "<jpeg base64>"], "otp": null }
+```
+
+A blink retry is the same call with two frames, eyes closed then eyes open. A code retry sets `otp` and includes the latest frame. You do not hand anything to Person 4. Person 2 writes the visit row.
+
 ## Person 2, decision service
 
 Done when a real payload returns in under 2 seconds with scores and `elapsed_ms`.
@@ -162,6 +187,44 @@ Call DetectFaces once and SearchFacesByImage once per request. Do not call them 
 
 Leave the SageMaker GPU endpoint off unless Person 4 shows a mask or a video replay getting `allow`.
 
+**You receive**
+
+- From Person 1, the `/check` body above.
+- From Person 3, the collection id, the S3 bucket, and the enrolled person ids. One face is enough to start.
+- From Person 3, on a code retry, whether that `otp` is valid.
+- From Person 4, only a report that a labeled spoof was allowed.
+
+**You hand to Person 1**
+
+```json
+{
+  "decision": "allow",
+  "reason": "live_and_match",
+  "scores": { "spoof": 0.92, "similarity": 99.1, "sharpness": 80 },
+  "elapsed_ms": 640
+}
+```
+
+**You hand to Person 4**
+
+One DynamoDB item per visit. Use table `visits` in `us-east-1` unless you all agree on another name in the first hour.
+
+```json
+{
+  "visit_id": "uuid",
+  "timestamp": "ISO-8601",
+  "decision": "allow",
+  "reason": "live_and_match",
+  "spoof": 0.92,
+  "similarity": 99.1,
+  "sharpness": 80,
+  "elapsed_ms": 640,
+  "label": null
+}
+```
+
+`label` stays empty until Person 4 sets it to `live`, `printed_photo`, `screen_replay`, `video_replay`, or `mask`. Write the row even when the call errors, with `reason` set to the error.
+
 ## Person 3, identity and step-up
 
 Done when an enrolled person can be allowed, a stranger is denied, and Ask again can require a blink or a code.
@@ -181,6 +244,20 @@ Then the step-up:
 Later, only after blink and SMS work: Rekognition Face Liveness. `CreateFaceLivenessSession` is allowed, and creating a Cognito identity pool is allowed. The Amplify Face Liveness component needs that pool so the browser can stream the colored-light check. Wire it only if a mask or a hard video still gets through. Take the reference image from the liveness result and run `SearchFacesByImage` on that image, not on an older frame.
 
 Do not launch a GPU instance.
+
+**You receive**
+
+- Photos of the people who are allowed in, from the team.
+- On a code retry, the `otp` string Person 1 sent and Person 2 asks you to check.
+
+**You hand to Person 2**
+
+- Collection id, for example `hid-faces`.
+- S3 bucket name.
+- Person id for each enrolled face. That id is the `IndexFaces` external image id.
+- For a code retry: `valid` or `invalid`. Person 2 turns `invalid` into `deny` / `otp_failed`.
+
+You do not hand a payload to Person 1 or Person 4. Person 2 is the only caller of your check.
 
 ## Person 4, scoreboard
 
@@ -206,6 +283,18 @@ For each label show:
 `ask_again` on a blurry live person is a correct low-quality path, not a false reject. `allow` on a printed photo is a false accept even if the face matches.
 
 The demo must include at least two of printed photo, screen, video, and mask. Run those against the real `/check` service and keep the numbers. If a mask or a video is allowed, tell Person 2. That is the only signal to turn on Face Liveness or one `ml.g4dn.xlarge` / `ml.g5.xlarge` endpoint.
+
+**You receive**
+
+The `visits` items Person 2 writes. You need `decision`, `reason`, `elapsed_ms`, and `label` on each row. You set `label` yourself when you know what was in front of the camera.
+
+**You hand to the pitch**
+
+One row per label: attempts, detection rate, false accepts, false rejects, average `elapsed_ms`.
+
+**You hand to Person 2**
+
+Nothing on a normal run. If a `printed_photo`, `screen_replay`, `video_replay`, or `mask` row has `decision: allow`, send Person 2 that `visit_id`, the label, and the scores. That is the handover that starts the spare path.
 
 ## First hour
 
