@@ -1,5 +1,7 @@
 # Decision service
 
+The full brief is in the root README, section "Person 2, decision service".
+
 Warm CPU service. On the sharpest frame, run together:
 
 - MiniFASNet spoof score
