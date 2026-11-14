@@ -1,0 +1,16 @@
+{
+  "request": {
+    "frames": ["<jpeg base64>", "<jpeg base64>"],
+    "otp": null
+  },
+  "response": {
+    "decision": "allow",
+    "reason": "live_and_match",
+    "scores": {
+      "spoof": 0.92,
+      "similarity": 99.1,
+      "sharpness": 80
+    },
+    "elapsed_ms": 640
+  }
+}
