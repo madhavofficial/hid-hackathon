@@ -296,6 +296,18 @@ def test_invalid_otp_is_denied_and_valid_otp_is_consumed():
         valid.close()
 
 
+def test_one_frame_requires_a_code():
+    harness = Harness()
+    try:
+        rejected = send(harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": None})
+        assert rejected.status_code == 422
+        accepted = send(harness, {"frames": [encoded_jpeg((20, 40, 80))], "otp": "482901"})
+        assert accepted.status_code == 200
+        assert accepted.json()["decision"] == "allow"
+    finally:
+        harness.close()
+
+
 def test_invalid_input_is_rejected_and_logged():
     harness = Harness()
     try:

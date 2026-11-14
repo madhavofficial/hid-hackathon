@@ -38,10 +38,6 @@ export async function submitCheck({ frames, otp = null }) {
     };
   }
 
-  if (!API_BASE_URL) {
-    throw new Error("VITE_API_BASE_URL is missing from your .env file.");
-  }
-
   const response = await fetch(`${API_BASE_URL}/check`, {
     method: "POST",
     headers: {
@@ -58,9 +54,12 @@ export async function submitCheck({ frames, otp = null }) {
   }
 
   if (!response.ok) {
-    throw new Error(
-      data?.detail || data?.reason || `Backend request failed (HTTP ${response.status}).`
-    );
+    const detail = data?.detail;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : detail?.message || data?.reason;
+    throw new Error(message || `Backend request failed (HTTP ${response.status}).`);
   }
 
   const decision = normalizeDecision(data?.decision);

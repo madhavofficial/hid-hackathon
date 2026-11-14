@@ -281,9 +281,10 @@ def _analyze_request(
     else:
         matching = bool(person_id and similarity >= settings.similarity_threshold)
         if (
-            matching
-            and frame_analysis.motion < settings.motion_threshold
-            and not frame_analysis.blink_sequence
+        matching
+        and len(decoded) >= 2
+        and frame_analysis.motion < settings.motion_threshold
+        and not frame_analysis.blink_sequence
         ):
             decision, reason = "deny", "spoof"
         elif matching:
@@ -322,11 +323,15 @@ def process_check(
         if not isinstance(payload, dict):
             raise InvalidFrameError("Request body must be a JSON object")
         encoded_frames = payload.get("frames")
-        if not isinstance(encoded_frames, list) or len(encoded_frames) not in (2, 3):
-            raise InvalidFrameError("frames must contain two or three JPEG images")
         otp = payload.get("otp")
         if otp is not None and not isinstance(otp, str):
             raise InvalidFrameError("otp must be a string or null")
+        has_otp = isinstance(otp, str) and otp.strip() != ""
+        frame_count = len(encoded_frames) if isinstance(encoded_frames, list) else 0
+        if frame_count not in (1, 2, 3) or (frame_count == 1 and not has_otp):
+            raise InvalidFrameError(
+                "frames must contain two or three JPEG images, or one image with a code"
+            )
         label = payload.get("label")
         if label is not None and not isinstance(label, str):
             raise InvalidFrameError("label must be a string or null")

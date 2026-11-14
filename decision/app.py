@@ -4,6 +4,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings
 from .service import AnalysisError, Runtime, create_runtime, process_check
@@ -22,6 +23,15 @@ def create_app(runtime_factory=create_runtime) -> FastAPI:
             runtime.close()
 
     app = FastAPI(title="HID decision service", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ],
+        allow_methods=["POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
 
     @app.post("/check")
     async def check(request: Request):
