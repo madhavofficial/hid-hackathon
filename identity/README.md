@@ -23,8 +23,10 @@ Hand this to Person 2:
 
 `person_id` has no default. Person 2 must pass the id returned by `SearchFacesByImage`. Do not call `verify_otp` when the visitor was not asked for a code. A DynamoDB failure raises. It does not look like a wrong code.
 
-Enrolling the same person again replaces the previous face and deletes the old S3 photo, including a photo saved under a different extension. `remove` deletes the face, the S3 photo, and the stored phone.
+Enrolling the same person again indexes the new photo first. The previous face and S3 photo stay if that index fails. On success, the old face and the old photo are removed, including a different file extension. A `.pending` upload is not treated as the saved photo. `remove` deletes the face, the S3 photo, and the stored phone.
 
-SNS must be able to send to the phone number. If this account is in the SNS SMS sandbox, verify that number in the SNS console before `otp send`. A failed send deletes the stored code and raises.
+`verify_otp` checks that `person_id` is in the `hid-faces` collection before it checks the code. An unknown id raises. A wrong code returns `False`.
+
+If the account is in the SNS SMS sandbox, the destination number must be verified in the SNS console. `otp send` checks that before it stores a code. If this role cannot read sandbox status, the send continues and a failed `sns.publish` still deletes the stored code and raises.
 
 The SMS code is not returned to the caller. If SNS cannot send, the stored code is deleted and the error is raised. The colored-light check still needs the kiosk Cognito wiring. It is not part of this step.

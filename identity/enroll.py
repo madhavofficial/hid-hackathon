@@ -128,6 +128,12 @@ def delete_phone(person_id: str, table_name: str = PEOPLE_TABLE) -> None:
     ddb.Table(table_name).delete_item(Key={"person_id": person_id})
 
 
+def _is_final_person_object(tail: str, person_id: str) -> bool:
+    if ".pending" in tail:
+        return False
+    return tail == person_id or tail.startswith(person_id + ".")
+
+
 def _delete_s3_objects(person_id: str, bucket: str) -> None:
     s3, _ = _clients()
     prefix = f"{S3_PREFIX}{person_id}"
@@ -139,7 +145,7 @@ def _delete_s3_objects(person_id: str, bucket: str) -> None:
         raise
     for obj in resp.get("Contents", []):
         tail = obj["Key"][len(S3_PREFIX):]
-        if tail == person_id or tail.startswith(person_id + "."):
+        if _is_final_person_object(tail, person_id):
             s3.delete_object(Bucket=bucket, Key=obj["Key"])
 
 
@@ -161,39 +167,56 @@ def enroll_person(
     s3, rek = _clients()
     ensure_bucket(bucket)
     ensure_collection(collection_id)
-    existing = [
-        face["face_id"]
-        for face in list_enrolled(collection_id)
-        if face["person_id"] == person_id and face["face_id"]
-    ]
-    if existing:
-        rek.delete_faces(CollectionId=collection_id, FaceIds=existing)
-    _delete_s3_objects(person_id, bucket)
 
     ext = path.suffix.lower() or ".jpg"
-    s3_key = f"{S3_PREFIX}{person_id}{ext}"
+    final_key = f"{S3_PREFIX}{person_id}{ext}"
+    pending_key = f"{S3_PREFIX}{person_id}.pending{ext}"
     content_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
 
     s3.upload_file(
         Filename=str(path),
         Bucket=bucket,
-        Key=s3_key,
+        Key=pending_key,
         ExtraArgs={"ContentType": content_type},
     )
-
-    resp = rek.index_faces(
-        CollectionId=collection_id,
-        Image={"S3Object": {"Bucket": bucket, "Name": s3_key}},
-        ExternalImageId=person_id,
-        MaxFaces=1,
-        QualityFilter="AUTO",
-        DetectionAttributes=["DEFAULT"],
-    )
+    try:
+        resp = rek.index_faces(
+            CollectionId=collection_id,
+            Image={"S3Object": {"Bucket": bucket, "Name": pending_key}},
+            ExternalImageId=person_id,
+            MaxFaces=1,
+            QualityFilter="AUTO",
+            DetectionAttributes=["DEFAULT"],
+        )
+    except ClientError:
+        s3.delete_object(Bucket=bucket, Key=pending_key)
+        raise
 
     records = resp.get("FaceRecords", [])
     if not records:
+        s3.delete_object(Bucket=bucket, Key=pending_key)
         unindexed = resp.get("UnindexedFaces", [])
         raise ValueError(f"No face indexed for {person_id}. Unindexed: {unindexed}")
+
+    existing = [
+        face["face_id"]
+        for face in list_enrolled(collection_id)
+        if face["person_id"] == person_id
+        and face["face_id"]
+        and face["face_id"] != records[0]["Face"]["FaceId"]
+    ]
+    if existing:
+        rek.delete_faces(CollectionId=collection_id, FaceIds=existing)
+    _delete_s3_objects(person_id, bucket)
+    s3.copy_object(
+        Bucket=bucket,
+        Key=final_key,
+        CopySource={"Bucket": bucket, "Key": pending_key},
+        ContentType=content_type,
+        MetadataDirective="REPLACE",
+    )
+    s3.delete_object(Bucket=bucket, Key=pending_key)
+    s3_key = final_key
 
     face = records[0]["Face"]
     if phone:
