@@ -179,24 +179,47 @@ def enroll_person(
         Key=pending_key,
         ExtraArgs={"ContentType": content_type},
     )
-    try:
-        resp = rek.index_faces(
+    def index_pending(quality_filter: str) -> dict:
+        return rek.index_faces(
             CollectionId=collection_id,
             Image={"S3Object": {"Bucket": bucket, "Name": pending_key}},
             ExternalImageId=person_id,
             MaxFaces=1,
-            QualityFilter="AUTO",
+            QualityFilter=quality_filter,
             DetectionAttributes=["DEFAULT"],
         )
+
+    try:
+        resp = index_pending("AUTO")
     except ClientError:
         s3.delete_object(Bucket=bucket, Key=pending_key)
         raise
 
     records = resp.get("FaceRecords", [])
+    quality_warning = None
+    if not records:
+        reasons = [
+            reason
+            for face in resp.get("UnindexedFaces", [])
+            for reason in (face.get("Reasons") or [])
+        ]
+        try:
+            resp = index_pending("NONE")
+        except ClientError:
+            s3.delete_object(Bucket=bucket, Key=pending_key)
+            raise
+        records = resp.get("FaceRecords", [])
+        if records:
+            quality_warning = "indexed below the AUTO quality bar: " + (
+                ", ".join(reasons) or "no reason reported"
+            )
     if not records:
         s3.delete_object(Bucket=bucket, Key=pending_key)
         unindexed = resp.get("UnindexedFaces", [])
-        raise ValueError(f"No face indexed for {person_id}. Unindexed: {unindexed}")
+        raise ValueError(
+            f"No face indexed for {person_id}. Previous enrollment is unchanged. "
+            f"Unindexed: {unindexed}"
+        )
 
     existing = [
         face["face_id"]
@@ -229,6 +252,7 @@ def enroll_person(
         "s3_key": s3_key,
         "collection_id": collection_id,
         "phone": phone,
+        "quality_warning": quality_warning,
     }
 
 

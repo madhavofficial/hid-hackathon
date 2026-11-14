@@ -83,6 +83,55 @@ def _sms_sandbox_block_reason(sns, phone_number: str) -> str | None:
     )
 
 
+def _denied(exc: ClientError) -> bool:
+    return exc.response.get("Error", {}).get("Code") == "AccessDeniedException"
+
+
+def _sms_spend_block_reason(sns) -> str | None:
+    """Raise the spend limit from 0 when this role is allowed to. Otherwise explain why."""
+    try:
+        attrs = sns.get_sms_attributes(attributes=["MonthlySpendLimit"])
+    except ClientError as exc:
+        if _denied(exc):
+            return None
+        raise
+    raw = (attrs.get("attributes") or {}).get("MonthlySpendLimit")
+    try:
+        limit = float(raw) if raw not in (None, "") else 0.0
+    except ValueError:
+        limit = 0.0
+    if limit > 0:
+        return None
+    try:
+        sns.set_sms_attributes(attributes={"MonthlySpendLimit": "1"})
+    except ClientError as exc:
+        if _denied(exc):
+            return (
+                "SNS monthly spend limit is 0 and this role cannot raise it. "
+                "Set MonthlySpendLimit in the SNS console, then retry."
+            )
+        raise
+    return None
+
+
+def _publish_failure(exc: ClientError) -> BaseException:
+    message = exc.response.get("Error", {}).get("Message", "")
+    low = message.lower()
+    if "origination" in low or "sender id" in low or "no identity" in low:
+        return ValueError(
+            "SNS has no origination identity for this destination. "
+            "In the SNS console, add a toll-free number or sender ID, then retry. "
+            f"AWS said: {message}"
+        )
+    if "spend" in low or "monthly" in low or "quota" in low:
+        return ValueError(
+            "SNS monthly spend limit blocked the text. "
+            "Raise MonthlySpendLimit in the SNS console, then retry. "
+            f"AWS said: {message}"
+        )
+    return exc
+
+
 def send_otp(
     person_id: str,
     phone_number: str | None = None,
@@ -110,6 +159,9 @@ def send_otp(
     sandbox_reason = _sms_sandbox_block_reason(sns, phone_number)
     if sandbox_reason:
         raise ValueError(sandbox_reason)
+    spend_reason = _sms_spend_block_reason(sns)
+    if spend_reason:
+        raise ValueError(spend_reason)
     ensure_otp_table(table_name)
 
     code = f"{secrets.randbelow(1_000_000):06d}"
@@ -135,9 +187,9 @@ def send_otp(
                 }
             },
         )
-    except ClientError:
+    except ClientError as exc:
         table.delete_item(Key={"person_id": person_id})
-        raise
+        raise _publish_failure(exc) from exc
 
     return {
         "person_id": person_id,

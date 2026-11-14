@@ -10,6 +10,7 @@ python -m identity.enroll add alice photos/alice.jpg --phone +919876543210
 python -m identity.enroll list
 python -m identity.otp send --person-id alice
 python -m identity.otp verify 123456 --person-id alice
+python -m identity.liveness setup
 ```
 
 Hand this to Person 2:
@@ -29,4 +30,8 @@ Enrolling the same person again indexes the new photo first. The previous face a
 
 If the account is in the SNS SMS sandbox, the destination number must be verified in the SNS console. `otp send` checks that before it stores a code. If this role cannot read sandbox status, the send continues and a failed `sns.publish` still deletes the stored code and raises.
 
-The SMS code is not returned to the caller. If SNS cannot send, the stored code is deleted and the error is raised. The colored-light check still needs the kiosk Cognito wiring. It is not part of this step.
+The SMS code is not returned to the caller. Before a code is stored, `otp send` checks the SMS sandbox and the monthly spend limit. A spend limit of 0 is raised to $1 when this role is allowed to do that. If the role cannot read those settings, the send continues. A failed `sns.publish` still deletes the stored code. The error says whether the block was the sandbox, the spend limit, or a missing origination identity.
+
+A photo that fails the AUTO quality bar is indexed once more with the quality filter off. If that also finds no face, the pending upload is deleted and the previous face stays. The error says the previous enrollment is unchanged.
+
+`python -m identity.liveness setup` creates Cognito identity pool `hid_liveness` and guest role `hid-liveness-unauth`, which may call `rekognition:StartFaceLivenessSession`. Hand Person 1 the printed `identity_pool_id` and `us-east-1`. Person 1 still mounts the Amplify camera component.

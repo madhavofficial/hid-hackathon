@@ -9,7 +9,7 @@ from .enroll import (
     require_person_id,
 )
 from .otp import ensure_otp_table, send_otp, verify_otp
-from .liveness import create_liveness_session, get_liveness_result
+from .liveness import create_liveness_session, get_liveness_result, setup_liveness_auth
 
 __all__ = [
     "AWS_REGION",
@@ -28,4 +28,5 @@ __all__ = [
     "verify_otp",
     "create_liveness_session",
     "get_liveness_result",
+    "setup_liveness_auth",
 ]
