@@ -50,13 +50,15 @@ class OnnxAntiSpoofModel:
             height = shape[2] if isinstance(shape[2], int) else self.input_height
             width = shape[3] if isinstance(shape[3], int) else self.input_width
             resized = image.resize((width, height), Image.Resampling.BILINEAR)
-            tensor = np.asarray(resized, dtype=np.float32) / 255.0
+            # MiniFASNet-V2 expects BGR in [0, 1], not RGB.
+            tensor = np.asarray(resized, dtype=np.float32)[:, :, ::-1] / 255.0
             tensor = np.transpose(tensor, (2, 0, 1))[None, ...]
         elif shape[3] == 3:
             height = shape[1] if isinstance(shape[1], int) else self.input_height
             width = shape[2] if isinstance(shape[2], int) else self.input_width
             resized = image.resize((width, height), Image.Resampling.BILINEAR)
-            tensor = (np.asarray(resized, dtype=np.float32) / 255.0)[None, ...]
+            bgr = np.asarray(resized, dtype=np.float32)[:, :, ::-1] / 255.0
+            tensor = bgr[None, ...]
         else:
             raise ModelUnavailableError("ONNX input must use RGB NCHW or NHWC layout")
 

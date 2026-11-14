@@ -237,6 +237,46 @@ def test_matching_face_with_no_motion_is_denied_as_spoof():
         harness.close()
 
 
+def test_valid_otp_is_kept_when_another_capture_is_needed():
+    harness = Harness()
+    harness.rekognition.detect_faces = lambda **_kwargs: {
+        "FaceDetails": [
+            {
+                "BoundingBox": {"Width": 0.05, "Height": 0.1},
+                "Quality": {"Sharpness": 80.0, "Brightness": 60.0},
+                "Pose": {"Yaw": 0.0, "Pitch": 0.0, "Roll": 0.0},
+                "EyesOpen": {"Value": True},
+            }
+        ]
+    }
+    try:
+        response = send(harness, payload("482901"))
+        assert response.json()["decision"] == "ask_again"
+        assert harness.otp.deleted is False
+    finally:
+        harness.close()
+
+
+def test_blink_clears_closed_eyes():
+    harness = Harness(blink_sequence=True)
+    harness.rekognition.detect_faces = lambda **_kwargs: {
+        "FaceDetails": [
+            {
+                "BoundingBox": {"Width": 0.5, "Height": 0.6},
+                "Quality": {"Sharpness": 80.0, "Brightness": 60.0},
+                "Pose": {"Yaw": 0.0, "Pitch": 0.0, "Roll": 0.0},
+                "EyesOpen": {"Value": False, "Confidence": 99.0},
+            }
+        ]
+    }
+    try:
+        response = send(harness)
+        assert response.json()["decision"] == "allow"
+        assert response.json()["reason"] == "live_and_match"
+    finally:
+        harness.close()
+
+
 def test_invalid_otp_is_denied_and_valid_otp_is_consumed():
     invalid = Harness()
     try:

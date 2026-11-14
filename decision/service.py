@@ -18,6 +18,7 @@ from .vision import (
     FrameAnalysis,
     InvalidFrameError,
     analyze_frames,
+    crop_face,
     decode_frame,
 )
 
@@ -141,8 +142,11 @@ def _verify_otp(runtime: Runtime, otp: str, person_id: str) -> bool:
             )
         return False
 
-    runtime.otp_table.delete_item(Key={"person_id": person_id})
     return True
+
+
+def _consume_otp(runtime: Runtime, person_id: str) -> None:
+    runtime.otp_table.delete_item(Key={"person_id": person_id})
 
 
 def _face_quality(
@@ -210,7 +214,9 @@ def _analyze_request(
         "sharpness": None,
     }
 
-    model_future = runtime.executor.submit(runtime.model.infer, selected.image)
+    model_future = runtime.executor.submit(
+        runtime.model.infer, crop_face(selected.image)
+    )
     detect_future = runtime.executor.submit(
         runtime.rekognition.detect_faces,
         Image={"Bytes": selected.jpeg_bytes},
@@ -251,9 +257,10 @@ def _analyze_request(
     face, quality_reason = _face_quality(detect_response, settings)
     sharpness = _safe_quality_scores(face)
     score_values["sharpness"] = sharpness
+    otp_accepted = False
     if otp is not None:
-        otp_valid = bool(person_id and _verify_otp(runtime, otp, person_id))
-        if not otp_valid:
+        otp_accepted = bool(person_id and _verify_otp(runtime, otp, person_id))
+        if not otp_accepted:
             return _persist(
                 runtime,
                 visit_id,
@@ -264,47 +271,34 @@ def _analyze_request(
                 label,
             )
 
+    if quality_reason == "eyes_closed" and frame_analysis.blink_sequence:
+        quality_reason = None
+
     if quality_reason:
-        return _persist(
-            runtime,
-            visit_id,
-            started_at,
-            "ask_again",
-            "low_quality",
-            score_values,
-            label,
-        )
+        decision, reason = "ask_again", "low_quality"
+    elif spoof_score < settings.spoof_threshold:
+        decision, reason = "deny", "spoof"
+    else:
+        matching = bool(person_id and similarity >= settings.similarity_threshold)
+        if (
+            matching
+            and frame_analysis.motion < settings.motion_threshold
+            and not frame_analysis.blink_sequence
+        ):
+            decision, reason = "deny", "spoof"
+        elif matching:
+            decision, reason = "allow", "live_and_match"
+        else:
+            decision, reason = "deny", "identity_mismatch"
 
-    if spoof_score < settings.spoof_threshold:
-        return _persist(
-            runtime, visit_id, started_at, "deny", "spoof", score_values, label
-        )
-
-    matching = bool(person_id and similarity >= settings.similarity_threshold)
-    if (
-        matching
-        and frame_analysis.motion < settings.motion_threshold
-        and not frame_analysis.blink_sequence
-    ):
-        return _persist(
-            runtime, visit_id, started_at, "deny", "spoof", score_values, label
-        )
-    if matching:
-        return _persist(
-            runtime,
-            visit_id,
-            started_at,
-            "allow",
-            "live_and_match",
-            score_values,
-            label,
-        )
+    if otp_accepted and person_id and decision != "ask_again":
+        _consume_otp(runtime, person_id)
     return _persist(
         runtime,
         visit_id,
         started_at,
-        "deny",
-        "identity_mismatch",
+        decision,
+        reason,
         score_values,
         label,
     )

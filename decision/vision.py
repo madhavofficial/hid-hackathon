@@ -113,8 +113,35 @@ def analyze_frames(frames: Sequence[DecodedFrame]) -> FrameAnalysis:
         eye_states.append(len(eyes) >= 2)
 
     blink_sequence = (
-        selected_index == len(frames) - 1
+        len(eye_states) >= 2
         and eye_states[-1] is True
         and any(state is False for state in eye_states[:-1])
     )
+    if blink_sequence:
+        selected_index = len(frames) - 1
     return FrameAnalysis(selected_index, motion, blink_sequence)
+
+
+def crop_face(image: Image.Image, scale: float = 2.7) -> Image.Image:
+    """Crop a 2.7x square around the largest face for MiniFASNet-V2."""
+    gray = np.asarray(image.convert("L"))
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    faces = cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40)
+    )
+    if len(faces) == 0:
+        return image
+    x, y, width, height = max(faces, key=lambda box: box[2] * box[3])
+    center_x = x + width / 2
+    center_y = y + height / 2
+    side = max(width, height) * scale
+    image_width, image_height = image.size
+    left = max(0, int(round(center_x - side / 2)))
+    top = max(0, int(round(center_y - side / 2)))
+    right = min(image_width, int(round(center_x + side / 2)))
+    bottom = min(image_height, int(round(center_y + side / 2)))
+    if right <= left or bottom <= top:
+        return image
+    return image.crop((left, top, right, bottom))

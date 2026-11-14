@@ -37,12 +37,12 @@ locally; image data and OTPs are not logged. The default visit table is
 | `MOTION_THRESHOLD` | `0.005` | Minimum normalized adjacent-frame motion |
 | `MAX_IMAGE_BYTES` | `5242880` | Maximum decoded size per JPEG |
 
-The ONNX adapter expects one RGB image input in NCHW or NHWC layout and a
-multi-class logits output. Input pixels are scaled to `[0, 1]`; the configured
-output index is interpreted as the live class. The model file is not included.
-Without it, the service starts but returns an analysis error and writes an
-error visit row rather than inventing a liveness score. Supply a compatible,
-validated model at the configured path before accepting visits.
+The included model is MiniFASNet-V2 (`decision/models/antispoof.onnx`),
+80×80 BGR, pixels divided by 255. Classes are live, print, replay. The live
+class is output index 0. The service crops a 2.7× square around the face
+before inference. A valid OTP is kept when the decision is `ask_again`, and
+deleted only after Allow or Deny. Closed eyes are `ask_again` unless the
+frames are a blink, closed then open.
 
 Thresholds are uncalibrated starting values. They do not guarantee accuracy,
 FAR, or FRR targets. Use the AWS SDK credential chain with temporary
