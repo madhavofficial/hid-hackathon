@@ -168,6 +168,7 @@ def enroll_person(
     ]
     if existing:
         rek.delete_faces(CollectionId=collection_id, FaceIds=existing)
+    _delete_s3_objects(person_id, bucket)
 
     ext = path.suffix.lower() or ".jpg"
     s3_key = f"{S3_PREFIX}{person_id}{ext}"
