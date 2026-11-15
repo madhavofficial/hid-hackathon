@@ -6,7 +6,10 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     proxy: {
-      "/check": "http://127.0.0.1:8000"
+      "/check": "http://127.0.0.1:8000",
+      "/session": "http://127.0.0.1:8000",
+      "/enroll": "http://127.0.0.1:8000",
+      "/otp": "http://127.0.0.1:8000"
     }
   }
 });

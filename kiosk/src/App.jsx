@@ -1,7 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import CameraPanel from "./components/CameraPanel";
 import DecisionPanel from "./components/DecisionPanel";
-import { submitCheck } from "./services/api";
+import EnrollForm from "./components/EnrollForm";
+import SignIn from "./components/SignIn";
+import { clearSession, loadSession, requestCode, submitCheck } from "./services/api";
 import { captureFrameSequence, captureJpegBase64, sleep } from "./utils/capture";
 
 const EMPTY_FEEDBACK = {
@@ -26,6 +28,15 @@ export default function App() {
   const [otp, setOtp] = useState("");
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState("");
+  const [codeNotice, setCodeNotice] = useState("");
+  const [session, setSession] = useState(() => loadSession());
+
+  function signOut() {
+    clearSession();
+    setSession(null);
+    setPage("capture");
+    setResult(null);
+  }
 
   const handleFeedback = useCallback((nextFeedback) => {
     feedbackRef.current = nextFeedback;
@@ -125,6 +136,26 @@ export default function App() {
     }
   }
 
+  async function handleSendCode() {
+    if (!cameraReady) {
+      setError("Camera is not ready.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    try {
+      const frame = await captureJpegBase64(videoRef.current);
+      const sent = await requestCode(frame);
+      setCodeNotice(`A code was sent for ${sent.person_id}.`);
+      setPage("code");
+    } catch (sendError) {
+      setError(sendError.message || "The code could not be sent.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCodeSubmit(event) {
     event.preventDefault();
 
@@ -158,6 +189,14 @@ export default function App() {
     feedback.centered &&
     !busy;
 
+  if (!session) {
+    return <SignIn onSignedIn={setSession} />;
+  }
+
+  if (session.role === "admin") {
+    return <EnrollForm onSignOut={signOut} />;
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -168,7 +207,10 @@ export default function App() {
         </div>
         <span className="topbar-status">
           <span className="status-dot" />
-          KIOSK ACTIVE
+          USER
+          <button className="text-button topbar-signout" type="button" onClick={signOut}>
+            Sign out
+          </button>
         </span>
       </header>
 
@@ -251,10 +293,7 @@ export default function App() {
                 result={result}
                 onRecapture={handleRecapture}
                 onBlink={handleBlinkRetry}
-                onCode={() => {
-                  setError("");
-                  setPage("code");
-                }}
+                onCode={handleSendCode}
               />
             )}
 
@@ -263,7 +302,7 @@ export default function App() {
                 <p className="section-kicker">ADDITIONAL VERIFICATION</p>
                 <h2>Enter your code</h2>
                 <p>
-                  The latest camera frame and the code will be sent together.
+                  {codeNotice || "A code is sent to the enrolled phone, then checked with the latest frame."}
                 </p>
                 <label htmlFor="otp">Verification code</label>
                 <input

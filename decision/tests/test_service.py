@@ -151,16 +151,31 @@ def test_data_uri_jpeg_is_decoded():
     assert decoded.image.size == (160, 160)
 
 
-def send(harness, data=None):
-    from decision import service
+def user_headers():
+    from identity.accounts import issue_token
 
-    original = service.analyze_frames
+    return {"Authorization": f"Bearer {issue_token('user', 'user')}"}
+
+
+def send(harness, data=None, headers=None):
+    from decision import service
+    from decision.schedule import campus_access as real_access
+
+    original_frames = service.analyze_frames
+    original_access = service.campus_access
     service.analyze_frames = harness.analyzer
+    if original_access is real_access:
+        service.campus_access = lambda _person_id, now=None: "allow"
     try:
         with TestClient(harness.app()) as client:
-            return client.post("/check", json=payload() if data is None else data)
+            return client.post(
+                "/check",
+                json=payload() if data is None else data,
+                headers=user_headers() if headers is None else headers,
+            )
     finally:
-        service.analyze_frames = original
+        service.analyze_frames = original_frames
+        service.campus_access = original_access
 
 
 def test_allow_and_single_rekognition_calls():
@@ -197,13 +212,33 @@ def test_identity_mismatch():
         harness.close()
 
 
-def test_low_quality_face_asks_again():
+def test_small_matched_face_is_a_presented_photo():
     harness = Harness()
     harness.rekognition.detect_faces = lambda **_kwargs: {
         "FaceDetails": [
             {
                 "BoundingBox": {"Width": 0.05, "Height": 0.1},
                 "Quality": {"Sharpness": 80.0, "Brightness": 60.0},
+                "Pose": {"Yaw": 0.0, "Pitch": 0.0, "Roll": 0.0},
+                "EyesOpen": {"Value": True},
+            }
+        ]
+    }
+    try:
+        response = send(harness)
+        assert response.json()["decision"] == "deny"
+        assert response.json()["reason"] == "spoof"
+    finally:
+        harness.close()
+
+
+def test_low_quality_face_asks_again():
+    harness = Harness()
+    harness.rekognition.detect_faces = lambda **_kwargs: {
+        "FaceDetails": [
+            {
+                "BoundingBox": {"Width": 0.5, "Height": 0.6},
+                "Quality": {"Sharpness": 5.0, "Brightness": 60.0},
                 "Pose": {"Yaw": 0.0, "Pitch": 0.0, "Roll": 0.0},
                 "EyesOpen": {"Value": True},
             }
@@ -247,13 +282,72 @@ def test_matching_face_with_no_motion_is_denied_as_spoof():
         harness.close()
 
 
+def test_otp_without_a_matched_face_asks_again_and_keeps_the_code():
+    harness = Harness(person_id=None, similarity=0.0)
+    harness.rekognition.detect_faces = lambda **_kwargs: {"FaceDetails": []}
+    try:
+        response = send(harness, payload("482901"))
+        assert response.json()["decision"] == "ask_again"
+        assert response.json()["reason"] == "low_quality"
+        assert harness.otp.item["attempts"] == 0
+        assert harness.otp.deleted is False
+    finally:
+        harness.close()
+
+
+def test_live_match_outside_schedule_asks_for_step_up(monkeypatch):
+    monkeypatch.setattr("decision.service.campus_access", lambda _person_id: "step_up")
+    harness = Harness()
+    try:
+        response = send(harness)
+        assert response.json()["decision"] == "ask_again"
+        assert response.json()["reason"] == "outside_schedule"
+        assert harness.otp.deleted is False
+    finally:
+        harness.close()
+
+
+def test_valid_otp_allows_a_live_match_outside_schedule(monkeypatch):
+    monkeypatch.setattr("decision.service.campus_access", lambda _person_id: "step_up")
+    harness = Harness()
+    try:
+        response = send(harness, payload("482901"))
+        assert response.json()["decision"] == "allow"
+        assert response.json()["reason"] == "schedule_step_up"
+        assert harness.otp.deleted
+    finally:
+        harness.close()
+
+
+def test_person_with_no_schedule_is_denied_even_with_a_code(monkeypatch):
+    monkeypatch.setattr("decision.service.campus_access", lambda _person_id: "deny")
+    harness = Harness()
+    try:
+        response = send(harness, payload("482901"))
+        assert response.json()["decision"] == "deny"
+        assert response.json()["reason"] == "not_scheduled"
+    finally:
+        harness.close()
+
+
+def test_spoof_is_not_saved_by_an_open_schedule(monkeypatch):
+    monkeypatch.setattr("decision.service.campus_access", lambda _person_id: "allow")
+    harness = Harness(motion=0.0)
+    try:
+        response = send(harness)
+        assert response.json()["decision"] == "deny"
+        assert response.json()["reason"] == "spoof"
+    finally:
+        harness.close()
+
+
 def test_valid_otp_is_kept_when_another_capture_is_needed():
     harness = Harness()
     harness.rekognition.detect_faces = lambda **_kwargs: {
         "FaceDetails": [
             {
-                "BoundingBox": {"Width": 0.05, "Height": 0.1},
-                "Quality": {"Sharpness": 80.0, "Brightness": 60.0},
+                "BoundingBox": {"Width": 0.5, "Height": 0.6},
+                "Quality": {"Sharpness": 5.0, "Brightness": 60.0},
                 "Pose": {"Yaw": 0.0, "Pitch": 0.0, "Roll": 0.0},
                 "EyesOpen": {"Value": True},
             }
@@ -336,6 +430,34 @@ def test_invalid_input_is_rejected_and_logged():
         harness.close()
 
 
+def test_rekognition_no_face_asks_again_instead_of_failing():
+    from botocore.exceptions import ClientError
+
+    harness = Harness()
+    error = ClientError(
+        {"Error": {"Code": "InvalidParameterException", "Message": "There are no faces in the image."}},
+        "SearchFacesByImage",
+    )
+
+    def search_without_face(**_kwargs):
+        harness.rekognition.search_calls += 1
+        raise error
+
+    def detect_without_face(**_kwargs):
+        harness.rekognition.detect_calls += 1
+        return {"FaceDetails": []}
+
+    harness.rekognition.search_faces_by_image = search_without_face
+    harness.rekognition.detect_faces = detect_without_face
+    try:
+        response = send(harness)
+        assert response.status_code == 200
+        assert response.json()["decision"] == "ask_again"
+        assert response.json()["reason"] == "low_quality"
+    finally:
+        harness.close()
+
+
 def test_analysis_failure_is_logged_without_leaking_input():
     harness = Harness(model_error=RuntimeError("model unavailable"))
     try:
@@ -386,8 +508,8 @@ def test_model_is_initialized_once_for_warm_app(monkeypatch):
     monkeypatch.setattr(service, "analyze_frames", FakeAnalyzer())
 
     with TestClient(create_app(service.create_runtime)) as client:
-        assert client.post("/check", json=payload()).status_code == 200
-        assert client.post("/check", json=payload()).status_code == 200
+        assert client.post("/check", json=payload(), headers=user_headers()).status_code == 200
+        assert client.post("/check", json=payload(), headers=user_headers()).status_code == 200
     assert len(model_initializations) == 1
     assert model.calls == 2
 

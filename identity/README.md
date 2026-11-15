@@ -4,6 +4,8 @@ The full brief is in the root README, section "Person 3, identity and step-up".
 
 Run these from the repo root, with AWS credentials in the environment or in `.env`.
 
+The kiosk has two accounts. `admin` / `admin` can enroll. `user` / `user` can only be verified. `POST /enroll` rejects the user account. `POST /check` accepts either signed-in account. Override the passwords with `ADMIN_PASSWORD` and `USER_PASSWORD`.
+
 ```bash
 python -m identity.enroll setup
 python -m identity.enroll add alice photos/alice.jpg --phone +919876543210

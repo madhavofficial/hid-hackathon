@@ -10,9 +10,11 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 
 from .config import Settings
 from .model import OnnxAntiSpoofModel
+from .schedule import campus_access
 from .vision import (
     DecodedFrame,
     FrameAnalysis,
@@ -25,6 +27,23 @@ from .vision import (
 
 class AnalysisError(RuntimeError):
     pass
+
+
+def _no_face_error(error: BaseException) -> bool:
+    if not isinstance(error, ClientError):
+        return False
+    details = error.response.get("Error", {})
+    message = str(details.get("Message", "")).lower()
+    return details.get("Code") == "InvalidParameterException" and "no face" in message
+
+
+def _rekognition_result(future, empty: dict[str, list]) -> dict:
+    error = future.exception()
+    if error is None:
+        return future.result()
+    if _no_face_error(error):
+        return empty
+    raise error
 
 
 def _worker_ready() -> None:
@@ -46,9 +65,9 @@ class Runtime:
 
 def create_runtime(settings: Settings) -> Runtime:
     aws_config = BotoConfig(
-        connect_timeout=1.0,
-        read_timeout=1.5,
-        retries={"total_max_attempts": 1},
+        connect_timeout=2.0,
+        read_timeout=5.0,
+        retries={"total_max_attempts": 2},
     )
     rekognition = boto3.client(
         "rekognition", region_name=settings.aws_region, config=aws_config
@@ -230,18 +249,12 @@ def _analyze_request(
         MaxFaces=1,
     )
 
-    results = []
-    errors = []
-    for future in (model_future, detect_future, search_future):
-        error = future.exception()
-        if error is not None:
-            errors.append(error)
-        else:
-            results.append(future.result())
-    if errors:
-        raise errors[0]
-
-    model_result, detect_response, search_response = results
+    model_error = model_future.exception()
+    if model_error is not None:
+        raise model_error
+    model_result = model_future.result()
+    detect_response = _rekognition_result(detect_future, {"FaceDetails": []})
+    search_response = _rekognition_result(search_future, {"FaceMatches": []})
     spoof_score = float(model_result)
     if not math.isfinite(spoof_score) or not 0 <= spoof_score <= 1:
         raise ValueError("Anti-spoof model returned an invalid probability")
@@ -259,7 +272,19 @@ def _analyze_request(
     score_values["sharpness"] = sharpness
     otp_accepted = False
     if otp is not None:
-        otp_accepted = bool(person_id and _verify_otp(runtime, otp, person_id))
+        # A code retry with no Rekognition face, or no enrolled match, has not
+        # checked the digits. Ask for another frame and leave the code unused.
+        if not person_id or quality_reason == "no_face":
+            return _persist(
+                runtime,
+                visit_id,
+                started_at,
+                "ask_again",
+                "low_quality",
+                score_values,
+                label,
+            )
+        otp_accepted = _verify_otp(runtime, otp, person_id)
         if not otp_accepted:
             return _persist(
                 runtime,
@@ -275,18 +300,37 @@ def _analyze_request(
         quality_reason = None
 
     matching = bool(person_id and similarity >= settings.similarity_threshold)
-    if quality_reason:
+    # A matched face that fills only a small part of the camera is a photo or
+    # phone held up to the lens, not a person standing at the kiosk.
+    presented_photo = matching and quality_reason == "tiny_face"
+    if presented_photo or (
+        matching
+        and (
+            spoof_score < settings.spoof_threshold
+            or (
+                len(decoded) >= 2
+                and frame_analysis.motion < settings.motion_threshold
+                and not frame_analysis.blink_sequence
+                and quality_reason != "no_face"
+            )
+        )
+    ):
+        decision, reason = "deny", "spoof"
+    elif quality_reason:
         decision, reason = "ask_again", "low_quality"
     elif not matching:
         decision, reason = "deny", "identity_mismatch"
-    elif spoof_score < settings.spoof_threshold or (
-        len(decoded) >= 2
-        and frame_analysis.motion < settings.motion_threshold
-        and not frame_analysis.blink_sequence
-    ):
-        decision, reason = "deny", "spoof"
     else:
         decision, reason = "allow", "live_and_match"
+
+    if decision == "allow" and person_id:
+        access = campus_access(person_id)
+        if access == "step_up" and not otp_accepted:
+            decision, reason = "ask_again", "outside_schedule"
+        elif access == "step_up":
+            decision, reason = "allow", "schedule_step_up"
+        elif access == "deny":
+            decision, reason = "deny", "not_scheduled"
 
     if otp_accepted and person_id and decision != "ask_again":
         _consume_otp(runtime, person_id)

@@ -2,7 +2,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 _DECISION_DIR = Path(__file__).resolve().parent
+load_dotenv(_DECISION_DIR.parent / ".env")
 
 
 @dataclass(frozen=True)
